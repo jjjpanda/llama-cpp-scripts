@@ -1,0 +1,10 @@
+{
+  "name": "llama-cpp-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Launcher scripts for a local llama.cpp chat and embedding server",
+  "scripts": {
+    "chat": "node llama.js",
+    "embed": "node embeddings.js"
+  }
+}
