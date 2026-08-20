@@ -5,6 +5,7 @@
   "description": "Launcher scripts for a local llama.cpp chat and embedding server",
   "scripts": {
     "chat": "node llama.js",
-    "embed": "node embeddings.js"
+    "embed": "node embeddings.js",
+    "models": "node models.js"
   }
 }
