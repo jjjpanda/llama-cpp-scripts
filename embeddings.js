@@ -7,7 +7,7 @@ try {
 
 const exe = process.env.LLAMA_SERVER_EXE;
 const model = process.env.LLAMA_EMBED_MODEL;
-const port = process.env.LLAMA_EMBED_PORT ?? "8081";
+const port = process.argv[2] ?? process.env.LLAMA_EMBED_PORT_DEFAULT ?? "8081";
 const host = process.env.LLAMA_EMBED_HOST ?? "127.0.0.1";
 const ngl = process.env.LLAMA_EMBED_NGL ?? "99";
 

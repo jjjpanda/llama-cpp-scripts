@@ -12,6 +12,7 @@ const exe = process.env.LLAMA_SERVER_EXE;
 const preset = process.env.LLAMA_MODELS_PRESET;
 const jinjaFiles = process.env.LLAMA_JINJA_FILES;
 const sectionPrefix = process.env.LLAMA_SECTION_PREFIX ?? "";
+const port = process.argv[2];
 const RETRY_INTERVAL_MS = Number(process.env.LLAMA_JINJA_RETRY_MS) || 1_800_000;
 
 if (!exe || !preset) {
@@ -73,7 +74,9 @@ let child;
 let restarting = false;
 
 function startServer(presetPath) {
-  child = spawn(exe, ["--models-preset", presetPath], { stdio: "inherit" });
+  const args = ["--models-preset", presetPath];
+  if (port) args.push("--port", port);
+  child = spawn(exe, args, { stdio: "inherit" });
   child.on("exit", (code) => {
     if (restarting) {
       restarting = false;
