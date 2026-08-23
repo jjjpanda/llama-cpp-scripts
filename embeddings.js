@@ -16,7 +16,7 @@ if (!exe || !model) {
   process.exit(1);
 }
 
-const args = ["--model", model, "--embedding", "--port", port, "--host", host, "-ngl", ngl];
+const args = ["--model", model, "--embedding", "--pooling", "mean", "--embd-normalize", "2", "--ctx-size", "4096", "--ubatch-size", "4096", "--port", port, "--host", host, "-ngl", ngl];
 
 const child = spawn(exe, args, { stdio: "inherit" });
 child.on("exit", (code) => process.exit(code ?? 0));
