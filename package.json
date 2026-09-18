@@ -5,7 +5,9 @@
   "description": "Launcher scripts for a local llama.cpp chat and embedding server",
   "scripts": {
     "chat": "node llama.js",
+    "chat:all": "node llama.js --env main --env prismml",
     "embed": "node embeddings.js",
-    "models": "node models.js"
+    "models": "node models.js",
+    "models:all": "node models.js --env main && node models.js --env prismml"
   }
 }

@@ -3,16 +3,58 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename, extname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-try {
-  process.loadEnvFile();
-} catch {}
+const suffixes = [];
+let _i;
+while ((_i = process.argv.indexOf("--env")) !== -1)
+  suffixes.push(process.argv.splice(_i, 2)[1]);
+if (!suffixes.length)
+  suffixes.push(process.argv.splice(2, 1)[0] ?? "");
+
+const envPath = (s) => s ? `.env.${s}` : ".env";
+
+if (suffixes.length > 1) {
+  const parsePort = (f) => {
+    try {
+      for (const line of readFileSync(f, "utf8").split(/\r?\n/)) {
+        const m = line.match(/^LLAMA_PORT\s*=\s*(.+)/);
+        if (m) return m[1].trim();
+      }
+    } catch {}
+    return null;
+  };
+  const ports = suffixes.map(s => parsePort(envPath(s)) ?? "8080");
+  const seen = new Map();
+  for (let j = 0; j < ports.length; j++) {
+    if (seen.has(ports[j])) {
+      console.error(`Port collision: "${suffixes[j]}" and "${seen.get(ports[j])}" both use port ${ports[j]}`);
+      process.exit(1);
+    }
+    seen.set(ports[j], suffixes[j]);
+  }
+  const self = fileURLToPath(import.meta.url);
+  const children = suffixes.map(s =>
+    spawn(process.execPath, [self, "--env", s], { stdio: "inherit" })
+  );
+  const codes = await Promise.all(children.map(c => new Promise(r => c.on("exit", r))));
+  process.exit(codes.find(c => c !== 0) ?? 0);
+}
+
+const envFile = envPath(suffixes[0]);
+try { process.loadEnvFile(envFile); } catch {
+  if (!suffixes[0]) try { process.loadEnvFile(".env.main"); } catch {
+    console.error("Usage: npm run chat -- <suffix>  (loads .env.<suffix>)");
+    process.exit(1);
+  }
+  else { console.error(`Cannot load ${envFile}`); process.exit(1); }
+}
 
 const exe = process.env.LLAMA_SERVER_EXE;
 const preset = process.env.LLAMA_MODELS_PRESET;
 const jinjaFiles = process.env.LLAMA_JINJA_FILES;
 const sectionPrefix = process.env.LLAMA_SECTION_PREFIX ?? "";
-const port = process.argv[2];
+const port = process.argv[2] ?? process.env.LLAMA_PORT;
 const RETRY_INTERVAL_MS = Number(process.env.LLAMA_JINJA_RETRY_MS) || 1_800_000;
 
 if (!exe || !preset) {
@@ -65,7 +107,8 @@ function renderPreset(entries) {
   const base = readFileSync(preset, "utf8");
   const rendered = sections.length ? `${base.trimEnd()}\n\n${sections.join("\n")}` : base;
 
-  const presetPath = join(tmpdir(), "llama-models-preset.ini");
+  const tag = suffixes[0] ? `-${suffixes[0]}` : "";
+  const presetPath = join(tmpdir(), `llama-models-preset${tag}.ini`);
   writeFileSync(presetPath, rendered);
   return presetPath;
 }
