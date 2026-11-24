@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gguf } from "@huggingface/gguf";
 
 const suffixes = [];
 let _i;
@@ -52,62 +53,65 @@ try { process.loadEnvFile(envFile); } catch {
 
 const exe = process.env.LLAMA_SERVER_EXE;
 const preset = process.env.LLAMA_MODELS_PRESET;
-const jinjaFiles = process.env.LLAMA_JINJA_FILES;
+const systemPrompts = process.env.LLAMA_SYSTEM_PROMPTS;
 const sectionPrefix = process.env.LLAMA_SECTION_PREFIX ?? "";
 const port = process.argv[2] ?? process.env.LLAMA_PORT;
-const RETRY_INTERVAL_MS = Number(process.env.LLAMA_JINJA_RETRY_MS) || 1_800_000;
+const RETRY_INTERVAL_MS = Number(process.env.LLAMA_PROMPT_RETRY_MS) || 1_800_000;
 
 if (!exe || !preset) {
   console.error("Missing LLAMA_SERVER_EXE or LLAMA_MODELS_PRESET. Copy .env.example to .env and fill in paths.");
   process.exit(1);
 }
 
-async function resolveJinjaPath(entry, index) {
-  if (!/^https?:\/\//i.test(entry)) {
-    try {
-      readFileSync(entry, "utf8");
-      return entry;
-    } catch {
-      return null;
-    }
-  }
+const isUrl = (entry) => /^https?:\/\//i.test(entry);
 
+async function readPrompt(entry) {
   try {
+    if (!isUrl(entry)) return readFileSync(entry, "utf8");
     const res = await fetch(entry);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const text = await res.text();
-
-    const urlName = basename(new URL(entry).pathname);
-    const localPath = join(tmpdir(), urlName || `llama-jinja-${index}.jinja`);
-    writeFileSync(localPath, text);
-    return localPath;
+    return await res.text();
   } catch {
     return null;
   }
 }
 
+async function readDefaultTemplate() {
+  const star = readFileSync(preset, "utf8").split(/^\[/m).find((s) => s.startsWith("*]"));
+  const model = star?.match(/^model\s*=\s*(.+)$/m)?.[1].trim();
+  if (!model) throw new Error("no model in [*] section");
+  const { metadata } = await gguf(model, { allowLocalFile: true });
+  const template = metadata["tokenizer.chat_template"];
+  if (!template) throw new Error(`no chat template in ${model}`);
+  return template;
+}
+
+const promptPrefix = (prompt) => `{%- set default_system_prompt = ${JSON.stringify(prompt.trim())} -%}
+{%- if messages[0]['role'] not in ['system', 'developer'] -%}
+    {%- set messages = [{'role': 'system', 'content': default_system_prompt}] + messages -%}
+{%- endif -%}
+`;
+
 function findDuplicateNames(entries) {
   const counts = new Map();
-  for (const e of entries) {
-    if (!e.path) continue;
-    const name = basename(e.path, extname(e.path));
-    counts.set(name, (counts.get(name) ?? 0) + 1);
-  }
+  for (const e of entries) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
   return [...counts].filter(([, count]) => count > 1).map(([name]) => name);
 }
 
-function renderPreset(entries) {
+const tag = suffixes[0] ? `-${suffixes[0]}` : "";
+
+function renderPreset(entries, template) {
   const sections = entries
-    .filter((e) => e.path)
+    .filter((e) => e.text)
     .map((e) => {
-      const name = basename(e.path, extname(e.path));
-      return `[${sectionPrefix}${name}]\nchat-template-file = ${e.path}\n`;
+      const path = join(tmpdir(), `llama-sys${tag}-${e.name}.jinja`);
+      writeFileSync(path, promptPrefix(e.text) + template);
+      return `[${sectionPrefix}${e.name}]\nchat-template-file = ${path}\n`;
     });
 
   const base = readFileSync(preset, "utf8");
   const rendered = sections.length ? `${base.trimEnd()}\n\n${sections.join("\n")}` : base;
 
-  const tag = suffixes[0] ? `-${suffixes[0]}` : "";
   const presetPath = join(tmpdir(), `llama-models-preset${tag}.ini`);
   writeFileSync(presetPath, rendered);
   return presetPath;
@@ -131,53 +135,59 @@ function startServer(presetPath) {
 
 let entries = [];
 let presetPath = preset;
+let template;
 
-if (jinjaFiles) {
-  const rawEntries = jinjaFiles.split(",").map((p) => p.trim()).filter(Boolean);
+if (systemPrompts) {
+  try {
+    template = await readDefaultTemplate();
+  } catch (err) {
+    console.error(`Cannot read chat template of the [*] model: ${err.message}`);
+    process.exit(1);
+  }
+
   entries = await Promise.all(
-    rawEntries.map(async (entry, index) => ({ entry, index, path: await resolveJinjaPath(entry, index) }))
+    systemPrompts.split(",").map((p) => p.trim()).filter(Boolean).map(async (entry) => ({
+      entry,
+      name: basename(isUrl(entry) ? new URL(entry).pathname : entry, extname(entry)),
+      text: await readPrompt(entry),
+    }))
   );
 
   for (const e of entries) {
-    if (!e.path) console.error(`Skipping ${e.entry}: not available yet, will retry in background`);
+    if (!e.text) console.error(`Skipping ${e.entry}: not available yet, will retry in background`);
   }
 
   const duplicates = findDuplicateNames(entries);
   if (duplicates.length) {
-    console.error(`Duplicate jinja file name(s): ${duplicates.join(", ")}. Rename the files so each has a unique name.`);
+    console.error(`Duplicate system prompt name(s): ${duplicates.join(", ")}. Rename the files so each has a unique name.`);
     process.exit(1);
   }
 
-  presetPath = renderPreset(entries);
+  presetPath = renderPreset(entries, template);
 }
 
 startServer(presetPath);
 
-if (entries.some((e) => !e.path)) {
+if (entries.some((e) => !e.text)) {
   const timer = setInterval(async () => {
     let changed = false;
     for (const e of entries) {
-      if (e.path) continue;
-      const path = await resolveJinjaPath(e.entry, e.index);
-      if (path) {
+      if (e.text) continue;
+      const text = await readPrompt(e.entry);
+      if (text) {
         console.error(`${e.entry} is now available, restarting llama-server`);
-        e.path = path;
+        e.text = text;
         changed = true;
       }
     }
 
     if (changed) {
-      const duplicates = findDuplicateNames(entries);
-      if (duplicates.length) {
-        console.error(`Duplicate jinja file name(s): ${duplicates.join(", ")}. Rename the files so each has a unique name. Skipping restart.`);
-      } else {
-        presetPath = renderPreset(entries);
-        restarting = true;
-        child.kill();
-        startServer(presetPath);
-      }
+      presetPath = renderPreset(entries, template);
+      restarting = true;
+      child.kill();
+      startServer(presetPath);
     }
 
-    if (entries.every((e) => e.path)) clearInterval(timer);
+    if (entries.every((e) => e.text)) clearInterval(timer);
   }, RETRY_INTERVAL_MS);
 }
